@@ -1,6 +1,3 @@
-// ===========================
-//  ASTEROIDS X — SERVER.JS
-// ===========================
 const express    = require('express');
 const http       = require('http');
 const { Server } = require('socket.io');
@@ -15,19 +12,18 @@ const io     = new Server(server, {
 app.use(cors());
 app.get('/', (req, res) => res.send('Asteroids X Server running'));
 
-// ===========================
-//  ESTADO GLOBAL
-// ===========================
-const rooms = {};  // { roomId: { players, mode, started, bets } }
+const rooms = {};
 
 function createRoom(roomId, mode = 'ranked') {
     rooms[roomId] = {
         id: roomId,
-        mode: mode,        // 'ranked' o 'practice'
+        mode: mode,
         players: {},
         started: false,
         bets: {},
-        createdAt: Date.now()
+        worldSeed: Math.floor(Math.random() * 999999),
+        createdAt: Date.now(),
+        ownerId: null
     };
     return rooms[roomId];
 }
@@ -38,36 +34,33 @@ function getRoomList() {
         mode: r.mode,
         playerCount: Object.keys(r.players).length,
         maxPlayers: 4,
-        started: r.started
+        started: r.started,
+        ownerId: r.ownerId
     }));
 }
 
-// ===========================
-//  CONEXIONES
-// ===========================
 io.on('connection', (socket) => {
     console.log('Jugador conectado:', socket.id);
 
-    // --- Pedir lista de salas ---
     socket.on('get_rooms', () => {
         socket.emit('room_list', getRoomList());
     });
 
-    // --- Crear sala ---
     socket.on('create_room', ({ roomId, mode, playerName }) => {
         if (rooms[roomId]) {
             socket.emit('error_msg', 'Esa sala ya existe');
             return;
         }
         const room = createRoom(roomId, mode || 'ranked');
+        room.ownerId = socket.id;
         joinRoom(socket, roomId, playerName);
-        io.emit('room_list', getRoomList()); // actualizar lista para todos
+        io.emit('room_list', getRoomList());
     });
 
-    // --- Unirse a sala ---
     socket.on('join_room', ({ roomId, playerName }) => {
-        const room = rooms[roomId];
+    const room = rooms[roomId];
         if (!room) { socket.emit('error_msg', 'Sala no encontrada'); return; }
+        if (room.started) { socket.emit('error_msg', 'Partida ya iniciada'); return; }
         if (Object.keys(room.players).length >= 4) {
             socket.emit('error_msg', 'Sala llena'); return;
         }
@@ -75,12 +68,28 @@ io.on('connection', (socket) => {
         io.emit('room_list', getRoomList());
     });
 
-    // --- Actualizar posición del jugador ---
+    // El dueño inicia la partida
+    socket.on('start_game', () => {
+    const roomId = socket.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        if (rooms[roomId].ownerId !== socket.id) {
+            socket.emit('error_msg', 'Solo el creador puede iniciar');
+            return;
+        }
+        rooms[roomId].started = true;
+        io.to(roomId).emit('game_started', {
+            worldSeed: rooms[roomId].worldSeed,
+            players: rooms[roomId].players
+        });
+        io.emit('room_list', getRoomList());
+        console.log(`Partida iniciada en sala ${roomId}`);
+    });
+
     socket.on('player_update', (data) => {
         const roomId = socket.roomId;
         if (!roomId || !rooms[roomId]) return;
+        if (!rooms[roomId].started) return;
 
-        // Actualizar estado del jugador en el servidor
         if (rooms[roomId].players[socket.id]) {
             rooms[roomId].players[socket.id] = {
                 ...rooms[roomId].players[socket.id],
@@ -88,11 +97,10 @@ io.on('connection', (socket) => {
                 id: socket.id
             };
         }
-        // Enviar a TODOS en la sala incluyendo al emisor para confirmar
-        io.to(roomId).emit('players_state', rooms[roomId].players);
+        // Solo enviar a los demás, no al emisor
+        socket.to(roomId).emit('players_state', rooms[roomId].players);
     });
 
-    // --- Jugador disparó ---
     socket.on('player_shoot', (bullet) => {
         const roomId = socket.roomId;
         if (!roomId) return;
@@ -102,28 +110,21 @@ io.on('connection', (socket) => {
         });
     });
 
-    // --- Jugador murió ---
     socket.on('player_died', () => {
         const roomId = socket.roomId;
         if (!roomId || !rooms[roomId]) return;
-
         if (rooms[roomId].players[socket.id]) {
             rooms[roomId].players[socket.id].alive = false;
         }
-
         io.to(roomId).emit('player_died', { id: socket.id });
-
-        // Verificar si queda un solo jugador vivo
         checkWinner(roomId);
     });
 
-    // --- Salir de sala ---
     socket.on('leave_room', () => {
         leaveRoom(socket);
         io.emit('room_list', getRoomList());
     });
 
-    // --- Desconexión ---
     socket.on('disconnect', () => {
         console.log('Jugador desconectado:', socket.id);
         leaveRoom(socket);
@@ -131,107 +132,115 @@ io.on('connection', (socket) => {
     });
 });
 
-// ===========================
-//  FUNCIONES AUXILIARES
-// ===========================
 function joinRoom(socket, roomId, playerName) {
     socket.join(roomId);
     socket.roomId = roomId;
 
-    const spawnX = 500 + Math.random() * 3000;
-    const spawnY = 500 + Math.random() * 3000;
+    const colors = ['#00f5ff', '#ff4444', '#39ff14', '#f72585'];
+    const idx = Object.keys(rooms[roomId].players).length;
 
     rooms[roomId].players[socket.id] = {
         id: socket.id,
         name: playerName || 'Jugador',
-        x: spawnX,
-        y: spawnY,
+        x: 500 + Math.random() * 3000,
+        y: 500 + Math.random() * 3000,
         angle: 0,
         speed: 0,
         alive: true,
         score: 0,
-        color: getPlayerColor(Object.keys(rooms[roomId].players).length - 1)
+        color: colors[idx % colors.length]
     };
 
-    // Generar semilla del mundo si es el primer jugador
-    if (!rooms[roomId].worldSeed) {
-        rooms[roomId].worldSeed = Math.floor(Math.random() * 999999);
-    }
-
+    // Avisar a todos en la sala que entró alguien
     io.to(roomId).emit('player_joined', {
         id: socket.id,
         player: rooms[roomId].players[socket.id],
         allPlayers: rooms[roomId].players,
         roomMode: rooms[roomId].mode
     });
-    /// confirmar que entro el jugador
+
+    // Confirmar al jugador que entró, con info del lobby
     socket.emit('joined_room', {
         roomId,
         myId: socket.id,
         players: rooms[roomId].players,
         mode: rooms[roomId].mode,
-        worldSeed: rooms[roomId].worldSeed
+        worldSeed: rooms[roomId].worldSeed,
+        ownerId: rooms[roomId].ownerId,
+        started: rooms[roomId].started
     });
 
-    console.log(`${playerName} entró a sala ${roomId}`);
+    console.log(`${playerName} entró a sala ${roomId} (${rooms[roomId].mode})`);
 }
 
 function leaveRoom(socket) {
     const roomId = socket.roomId;
     if (!roomId || !rooms[roomId]) return;
 
+    const playerName = rooms[roomId].players[socket.id]?.name || 'Jugador';
     delete rooms[roomId].players[socket.id];
     socket.leave(roomId);
     socket.roomId = null;
 
-    // Avisar a los demás
-    io.to(roomId).emit('player_left', { id: socket.id });
+    io.to(roomId).emit('player_left', { id: socket.id, name: playerName });
 
-    // Eliminar sala si está vacía
     const playerCount = Object.keys(rooms[roomId].players).length;
+
     if (playerCount === 0) {
         delete rooms[roomId];
-        console.log(`Sala ${roomId} eliminada`);
-    } else {
+        console.log(`Sala ${roomId} eliminada por vacía`);
+        return;
+    }
+
+    // Si el dueño se fue, pasar dueño al siguiente
+    if (rooms[roomId].ownerId === socket.id) {
+        const newOwner = Object.keys(rooms[roomId].players)[0];
+        rooms[roomId].ownerId = newOwner;
+        io.to(roomId).emit('new_owner', { ownerId: newOwner });
+    }
+
+    if (rooms[roomId].started) {
         checkWinner(roomId);
     }
 }
 
 function checkWinner(roomId) {
     if (!rooms[roomId]) return;
-    const alive = Object.values(rooms[roomId].players).filter(p => p.alive);
-    if (alive.length === 1 && Object.keys(rooms[roomId].players).length > 1) {
-        io.to(roomId).emit('game_winner', { winnerId: alive[0].id, winnerName: alive[0].name });
-        // Reiniciar sala después de 5 segundos
+    const players = Object.values(rooms[roomId].players);
+    const alive = players.filter(p => p.alive);
+
+    if (players.length > 1 && alive.length === 1) {
+        io.to(roomId).emit('game_winner', {
+            winnerId: alive[0].id,
+            winnerName: alive[0].name
+        });
         setTimeout(() => {
-            if (rooms[roomId]) {
-                Object.values(rooms[roomId].players).forEach(p => p.alive = true);
-                rooms[roomId].started = false;
-                io.to(roomId).emit('room_reset');
-            }
+            if (!rooms[roomId]) return;
+            Object.values(rooms[roomId].players).forEach(p => p.alive = true);
+            rooms[roomId].started = false;
+            io.to(roomId).emit('room_reset');
+            io.emit('room_list', getRoomList());
         }, 5000);
     }
 }
 
-function getPlayerColor(index) {
-    const colors = ['#00f5ff', '#ff4444', '#39ff14', '#f72585'];
-    return colors[index % colors.length];
-}
-
-// ===========================
-//  ARRANCAR SERVIDOR
-// ===========================
-const PORT = process.env.PORT || 3000;
-// Limpiar salas vacías cada 60 segundos
+// Limpiar salas vacías o inactivas cada 2 minutos
 setInterval(() => {
+    const now = Date.now();
     Object.keys(rooms).forEach(roomId => {
-        const count = Object.keys(rooms[roomId].players).length;
-        if (count === 0) {
+        const room = rooms[roomId];
+        const count = Object.keys(room.players).length;
+        const age = now - room.createdAt;
+        // Eliminar si está vacía o lleva más de 30 min sin iniciarse
+        if (count === 0 || (!room.started && age > 30 * 60 * 1000)) {
             delete rooms[roomId];
             console.log(`Sala ${roomId} eliminada por inactividad`);
+            io.emit('room_list', getRoomList());
         }
     });
-}, 60000);
+}, 2 * 60 * 1000);
+
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Servidor corriendo en puerto ${PORT}`);
 });
