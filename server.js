@@ -86,6 +86,29 @@ io.on('connection', (socket) => {
     });
 
     socket.on('player_update', (data) => {
+                // Estado del mundo (solo el host lo envía)
+        socket.on('world_update', (data) => {
+            const roomId = socket.roomId;
+            if (!roomId || !rooms[roomId]) return;
+            // Solo el dueño puede enviar el estado del mundo
+            if (rooms[roomId].ownerId !== socket.id) return;
+            // Reenviar a todos menos al dueño
+            socket.to(roomId).emit('world_state', data);
+        });
+
+        // Evento sincronizado: asteroide destruido
+        socket.on('asteroid_destroyed', (data) => {
+            const roomId = socket.roomId;
+            if (!roomId) return;
+            socket.to(roomId).emit('asteroid_destroyed', data);
+        });
+
+        // Evento sincronizado: enemigo dañado/destruido
+        socket.on('enemy_hit', (data) => {
+            const roomId = socket.roomId;
+            if (!roomId) return;
+            socket.to(roomId).emit('enemy_hit', data);
+        });
         const roomId = socket.roomId;
         if (!roomId || !rooms[roomId]) return;
         if (!rooms[roomId].started) return;
