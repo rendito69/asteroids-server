@@ -436,4 +436,13 @@ setInterval(() => {
 }, 2 * 60 * 1000);
 
 const PORT = process.env.PORT || 3000;
+
+// Evitar que Render duerma el servidor
+const https = require('https');
+setInterval(() => {
+    https.get('https://asteroids-server.onrender.com', (res) => {
+        console.log('Keep-alive ping:', res.statusCode);
+    }).on('error', () => {});
+}, 10 * 60 * 1000); // ping cada 10 minutos
+
 server.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
