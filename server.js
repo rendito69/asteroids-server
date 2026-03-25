@@ -295,46 +295,72 @@ io.on('connection', (socket) => {
         const roomId = socket.roomId;
         if (!roomId || !rooms[roomId]) return;
 
-        // Reenviar bala a los demás
+        // Reenviar bala visual a los demás
         socket.to(roomId).emit('remote_bullet', { ...bullet, ownerId: socket.id });
 
         const room = rooms[roomId];
 
-        // Colisión con asteroides
-        for (let ai = room.asteroids.length - 1; ai >= 0; ai--) {
-            const a = room.asteroids[ai];
-            if (dist2(bullet, a) < a.size) {
-                if (a.indestructible) {
-                    io.to(roomId).emit('bullet_hit', { x: bullet.x, y: bullet.y });
+        // Buscar el asteroide más cercano a la trayectoria de la bala
+        // Simulamos la bala por 60 frames para detectar colisión
+        let bx = bullet.x;
+        let by = bullet.y;
+        const bvx = Math.cos(bullet.angle) * bullet.speed;
+        const bvy = Math.sin(bullet.angle) * bullet.speed;
+
+        for (let step = 0; step < 60; step++) {
+            bx += bvx;
+            by += bvy;
+
+            // Colisión con asteroides
+            let hitAsteroid = false;
+            for (let ai = room.asteroids.length - 1; ai >= 0; ai--) {
+                const a = room.asteroids[ai];
+                const d = Math.sqrt((bx - a.x)**2 + (by - a.y)**2);
+                if (d < a.size) {
+                    if (a.indestructible) {
+                        io.to(roomId).emit('bullet_hit', { x: bx, y: by });
+                        return;
+                    }
+                    room.asteroids.splice(ai, 1);
+                    io.to(roomId).emit('asteroid_destroyed', {
+                        id: a.id, x: a.x, y: a.y, size: a.size
+                    });
+                    if (a.size > 20) {
+                        const c1 = spawnAsteroid(room, a.x, a.y, a.size/2, false);
+                        const c2 = spawnAsteroid(room, a.x, a.y, a.size/2, false);
+                        io.to(roomId).emit('asteroids_spawned', [c1, c2]);
+                    }
+                    if (rooms[roomId].players[socket.id]) {
+                        rooms[roomId].players[socket.id].score =
+                            (rooms[roomId].players[socket.id].score || 0) + 10;
+                    }
+                    hitAsteroid = true;
+                    break;
+                }
+            }
+            if (hitAsteroid) return;
+
+            // Colisión con enemigos
+            for (let ei = room.enemies.length - 1; ei >= 0; ei--) {
+                const e = room.enemies[ei];
+                const d = Math.sqrt((bx - e.x)**2 + (by - e.y)**2);
+                if (d < 25) {
+                    e.hp--;
+                    io.to(roomId).emit('explosion', { x: e.x, y: e.y });
+                    if (e.hp <= 0) {
+                        room.enemies.splice(ei, 1);
+                        io.to(roomId).emit('enemy_destroyed', {
+                            id: e.id, x: e.x, y: e.y
+                        });
+                        if (rooms[roomId].players[socket.id]) {
+                            rooms[roomId].players[socket.id].score =
+                                (rooms[roomId].players[socket.id].score || 0) + 50;
+                        }
+                    } else {
+                        io.to(roomId).emit('enemy_damaged', { id: e.id, hp: e.hp });
+                    }
                     return;
                 }
-                room.asteroids.splice(ai, 1);
-                io.to(roomId).emit('asteroid_destroyed', { id: a.id, x: a.x, y: a.y, size: a.size });
-                if (a.size > 20) {
-                    const c1 = spawnAsteroid(room, a.x, a.y, a.size/2, false);
-                    const c2 = spawnAsteroid(room, a.x, a.y, a.size/2, false);
-                    io.to(roomId).emit('asteroids_spawned', [c1, c2]);
-                }
-                if (rooms[roomId].players[socket.id])
-                    rooms[roomId].players[socket.id].score = (rooms[roomId].players[socket.id].score || 0) + 10;
-                return;
-            }
-        }
-
-        // Colisión con enemigos
-        for (let ei = room.enemies.length - 1; ei >= 0; ei--) {
-            const e = room.enemies[ei];
-            if (dist2(bullet, e) < 20) {
-                e.hp--;
-                if (e.hp <= 0) {
-                    room.enemies.splice(ei, 1);
-                    io.to(roomId).emit('enemy_destroyed', { id: e.id, x: e.x, y: e.y });
-                    if (rooms[roomId].players[socket.id])
-                        rooms[roomId].players[socket.id].score = (rooms[roomId].players[socket.id].score || 0) + 50;
-                } else {
-                    io.to(roomId).emit('enemy_damaged', { id: e.id, hp: e.hp });
-                }
-                return;
             }
         }
     });
